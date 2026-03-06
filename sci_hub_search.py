@@ -3,18 +3,88 @@ import re
 import os
 import urllib3
 import requests
+from playwright.sync_api import sync_playwright
 
-# 禁用 HTTPS 证书验证警告
+# Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
+def scrape_pdf_with_playwright(doi):
+    """Use Playwright to scrape PDF URL from Sci-Hub mirrors"""
+    mirrors = [
+        'sci-hub.al', 'sci-hub.mk', 'sci-hub.ee',
+        'sci-hub.se', 'sci-hub.st', 'sci-hub.wf',
+        'sci-hub.sg', 'sci-hub.hk', 'sci-hub.io'
+    ]
+
+    for mirror in mirrors:
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--proxy-server=direct://',
+                    ]
+                )
+                page = browser.new_page()
+                url = f'https://{mirror}/{doi}'
+
+                try:
+                    page.goto(url, wait_until='domcontentloaded', timeout=60000)
+                except Exception as e:
+                    browser.close()
+                    continue
+
+                page.wait_for_timeout(15000)
+
+                # Look for PDF links in iframes or anchors
+                for selector in ['iframe[src*="pdf"]', 'a[href*=".pdf"]', 'a[href*="download"]', 'iframe']:
+                    try:
+                        elems = page.query_selector_all(selector)
+                        for elem in elems:
+                            src = elem.get_attribute('src')
+                            if src and 'pdf' in src.lower():
+                                browser.close()
+                                return src, mirror
+                    except:
+                        pass
+
+                browser.close()
+        except:
+            continue
+
+    return None, None
+
+
 def create_scihub_instance():
-    """创建 SciHub 实例并配置"""
+    """Create configured SciHub instance"""
     sh = SciHub()
-    sh.timeout = 30  # 增加超时时间到 30 秒
+    sh.timeout = 30
+    # Use mirrors that work through proxies
+    sh.available_base_url_list = ['sci-hub.al', 'sci-hub.mk', 'sci-hub.ee']
     return sh
 
+
 def search_paper_by_doi(doi):
-    """通过 DOI 在 Sci-Hub 上搜索论文"""
+    """Search for paper on Sci-Hub by DOI"""
+    # Try Playwright first for mirrors that need JS
+    try:
+        pdf_url, mirror = scrape_pdf_with_playwright(doi)
+        if pdf_url:
+            return {
+                'doi': doi,
+                'pdf_url': pdf_url,
+                'mirror_used': mirror,
+                'status': 'success',
+                'title': '',
+                'author': '',
+                'year': ''
+            }
+    except:
+        pass
+
+    # Fallback to scihub library
     sh = create_scihub_instance()
     try:
         result = sh.fetch(doi)
@@ -27,7 +97,7 @@ def search_paper_by_doi(doi):
             'year': result.get('year', '')
         }
     except Exception as e:
-        print(f"搜索出错: {str(e)}")
+        print(f"Search error: {str(e)}")
         return {
             'doi': doi,
             'status': 'not_found'
@@ -74,13 +144,21 @@ def search_papers_by_keyword(keyword, num_results=10):
     return papers
 
 def download_paper(pdf_url, output_path):
-    """下载论文 PDF"""
-    sh = SciHub()
+    """Download paper PDF"""
     try:
-        sh.download(pdf_url, output_path)
-        return True
+        clean_url = pdf_url.split('#')[0]
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(clean_url, headers=headers, verify=False, timeout=60, allow_redirects=True)
+
+        if response.status_code == 200:
+            with open(output_path, 'wb') as f:
+                f.write(response.content)
+            return True
+        else:
+            print(f"Download failed: HTTP {response.status_code}")
+            return False
     except Exception as e:
-        print(f"下载出错: {str(e)}")
+        print(f"Download error: {str(e)}")
         return False
 
 
